@@ -1,14 +1,20 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/sessions"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/logger"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/util/ptr"
 )
 
 const keycloakOIDCProviderName = "Keycloak OIDC"
@@ -16,6 +22,7 @@ const keycloakOIDCProviderName = "Keycloak OIDC"
 // KeycloakOIDCProvider creates a Keycloak provider based on OIDCProvider
 type KeycloakOIDCProvider struct {
 	*OIDCProvider
+	useRPT bool
 }
 
 // NewKeycloakOIDCProvider makes a KeycloakOIDCProvider using the ProviderData
@@ -26,6 +33,7 @@ func NewKeycloakOIDCProvider(p *ProviderData, opts options.Provider) *KeycloakOI
 
 	provider := &KeycloakOIDCProvider{
 		OIDCProvider: NewOIDCProvider(p, opts.OIDCConfig),
+		useRPT:       ptr.Deref(opts.KeycloakConfig.UseRPTToken, false),
 	}
 
 	provider.addAllowedRoles(opts.KeycloakConfig.Roles)
@@ -68,7 +76,21 @@ func (p *KeycloakOIDCProvider) EnrichSession(ctx context.Context, s *sessions.Se
 	if err != nil {
 		return fmt.Errorf("could not enrich oidc session: %v", err)
 	}
-	return p.extractRoles(s)
+	if err := p.extractRoles(s); err != nil {
+		return err
+	}
+
+	if p.useRPT {
+		rpt, expiry, err := p.obtainRPT(ctx, s.AccessToken)
+		if err != nil {
+			return fmt.Errorf("unable to obtain RPT: %v", err)
+		}
+		s.AccessToken = rpt
+		s.CreatedAtNow()
+		s.SetExpiresOn(expiry)
+	}
+
+	return nil
 }
 
 // RefreshSession adds role extraction logic to the refresh flow
@@ -80,7 +102,60 @@ func (p *KeycloakOIDCProvider) RefreshSession(ctx context.Context, s *sessions.S
 		return refreshed, err
 	}
 
-	return true, p.extractRoles(s)
+	if err := p.extractRoles(s); err != nil {
+		return true, err
+	}
+
+	if p.useRPT {
+		rpt, expiry, err := p.obtainRPT(ctx, s.AccessToken)
+		if err != nil {
+			return true, fmt.Errorf("unable to obtain RPT on refresh: %v", err)
+		}
+		s.AccessToken = rpt
+		s.CreatedAtNow()
+		s.SetExpiresOn(expiry)
+	}
+
+	return true, nil
+}
+
+// obtainRPT exchanges a PAT for a Keycloak UMA RPT using the token endpoint
+func (p *KeycloakOIDCProvider) obtainRPT(ctx context.Context, pat string) (string, time.Time, error) {
+	if pat == "" {
+		return "", time.Time{}, fmt.Errorf("missing PAT for RPT exchange")
+	}
+
+	params := url.Values{}
+	params.Add("grant_type", "urn:ietf:params:oauth:grant-type:uma-ticket")
+	if p.ClientID != "" {
+		params.Add("audience", p.ClientID)
+	}
+
+	var respBody struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}
+
+	// POST form to token endpoint with Authorization: Bearer <PAT>
+	err := requests.New(p.RedeemURL.String()).
+		WithContext(ctx).
+		WithMethod("POST").
+		WithBody(bytes.NewBufferString(params.Encode())).
+		SetHeader("Content-Type", "application/x-www-form-urlencoded").
+		SetHeader("Authorization", tokenTypeBearer+" "+pat).
+		Do().
+		UnmarshalInto(&respBody)
+	if err != nil {
+		logger.Errorf("RPT exchange request failed: %v", err)
+		return "", time.Time{}, err
+	}
+
+	if respBody.AccessToken == "" {
+		return "", time.Time{}, fmt.Errorf("RPT exchange did not return access_token")
+	}
+
+	expiry := time.Now().Add(time.Duration(respBody.ExpiresIn) * time.Second)
+	return respBody.AccessToken, expiry, nil
 }
 
 func (p *KeycloakOIDCProvider) extractRoles(s *sessions.SessionState) error {

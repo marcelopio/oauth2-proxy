@@ -9,6 +9,9 @@ const (
 	// OIDCGroupsClaim is the generic groups claim used by the OIDC provider.
 	OIDCGroupsClaim string = "groups"
 
+	// OIDCAudience is the generic audience claim used by the OIDC provider.
+	OIDCAudience string = "aud"
+
 	// DefaultSkipDiscovery is the default value
 	// for OIDCOptions.SkipDiscovery
 	DefaultSkipDiscovery bool = false
@@ -51,7 +54,7 @@ const (
 )
 
 // OIDCAudienceClaims is the generic audience claim list used by the OIDC provider.
-var OIDCAudienceClaims = []string{"aud"}
+var OIDCAudienceClaims = []string{OIDCAudience}
 
 // The provider can be selected using the `provider` configuration value, or
 // set in the [`providers` array using
@@ -206,6 +209,9 @@ type KeycloakOptions struct {
 
 	// Role enables to restrict login to users with role (only available when using the keycloak-oidc provider)
 	Roles []string `yaml:"roles,omitempty"`
+	// UseRPTToken enables exchanging the initial access token for a Keycloak UMA RPT
+	// Default value is 'false' (opt-in)
+	UseRPTToken *bool `yaml:"useRPTToken,omitempty"`
 }
 
 type AzureOptions struct {

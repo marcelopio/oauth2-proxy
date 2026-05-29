@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -111,6 +112,153 @@ var _ = Describe("Keycloak OIDC Provider Tests", func() {
 			Expect(providerData.ProfileURL.String()).To(Equal("https://keycloak-oidc.com/api/v3/user"))
 			Expect(providerData.ValidateURL.String()).To(Equal("https://keycloak-oidc.com/api/v3/user"))
 			Expect(providerData.Scope).To(Equal(oidcDefaultScope))
+		})
+
+		Context("RPT Exchange", func() {
+			It("does not call UMA when UseRPTToken is disabled", func() {
+				umaCalled := false
+				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					_ = r.ParseForm()
+					gt := r.FormValue("grant_type")
+					rw.Header().Add("content-type", "application/json")
+					if gt == "urn:ietf:params:oauth:grant-type:uma-ticket" {
+						umaCalled = true
+						rw.WriteHeader(500)
+						_, _ = rw.Write([]byte(`{"error":"not expected"}`))
+						return
+					}
+					// default profile/token response
+					fmt.Fprintf(rw, `{"email": "new@thing.com", "expires_in": 300, "id_token": "%v", "access_token": "%v"}`, makeIDToken(), makeAccessToken())
+				}))
+				defer server.Close()
+
+				u, _ := url.Parse(server.URL)
+				provider := newKeycloakOIDCProvider(u, options.Provider{})
+				provider.ProfileURL = u
+
+				existingSession := &sessions.SessionState{
+					User:        "already",
+					Email:       "a@b.com",
+					Groups:      nil,
+					IDToken:     makeIDToken(),
+					AccessToken: makeAccessToken(),
+				}
+
+				err := provider.EnrichSession(context.Background(), existingSession)
+				Expect(err).To(BeNil())
+				Expect(umaCalled).To(BeFalse())
+				Expect(existingSession.AccessToken).To(Equal(makeAccessToken()))
+			})
+
+			It("exchanges PAT for RPT when enabled and preserves roles", func() {
+				rptToken := "rpt.header.payload.sig"
+				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					_ = r.ParseForm()
+					gt := r.FormValue("grant_type")
+					rw.Header().Add("content-type", "application/json")
+					if gt == "urn:ietf:params:oauth:grant-type:uma-ticket" {
+						fmt.Fprintf(rw, `{"access_token":"%s","expires_in":3600}`, rptToken)
+						return
+					}
+					// default
+					fmt.Fprintf(rw, `{"email": "new@thing.com", "expires_in": 300, "id_token": "%v", "access_token": "%v"}`, makeIDToken(), makeAccessToken())
+				}))
+				defer server.Close()
+
+				u, _ := url.Parse(server.URL)
+				provider := newKeycloakOIDCProvider(u, options.Provider{})
+				provider.ProfileURL = u
+				// enable RPT path
+				provider.useRPT = true
+
+				existingSession := &sessions.SessionState{
+					User:        "already",
+					Email:       "a@b.com",
+					Groups:      nil,
+					IDToken:     makeIDToken(),
+					AccessToken: makeAccessToken(),
+				}
+
+				err := provider.EnrichSession(context.Background(), existingSession)
+				Expect(err).To(BeNil())
+				Expect(existingSession.AccessToken).To(Equal(rptToken))
+				Expect(existingSession.ExpiresOn).ToNot(BeNil())
+				Expect(existingSession.Groups).To(BeEquivalentTo([]string{"role:write", "role:default:read"}))
+			})
+
+			It("returns error when UMA endpoint fails", func() {
+				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					_ = r.ParseForm()
+					gt := r.FormValue("grant_type")
+					rw.Header().Add("content-type", "application/json")
+					if gt == "urn:ietf:params:oauth:grant-type:uma-ticket" {
+						rw.WriteHeader(http.StatusForbidden)
+						_, _ = rw.Write([]byte(`{"error":"forbidden"}`))
+						return
+					}
+					fmt.Fprintf(rw, `{"email": "new@thing.com", "expires_in": 300, "id_token": "%v", "access_token": "%v"}`, makeIDToken(), makeAccessToken())
+				}))
+				defer server.Close()
+
+				u, _ := url.Parse(server.URL)
+				provider := newKeycloakOIDCProvider(u, options.Provider{})
+				provider.ProfileURL = u
+				provider.useRPT = true
+
+				existingSession := &sessions.SessionState{
+					User:        "already",
+					Email:       "a@b.com",
+					Groups:      nil,
+					IDToken:     makeIDToken(),
+					AccessToken: makeAccessToken(),
+				}
+
+				err := provider.EnrichSession(context.Background(), existingSession)
+				Expect(err).ToNot(BeNil())
+				// AccessToken should remain unchanged on failure
+				Expect(existingSession.AccessToken).To(Equal(makeAccessToken()))
+			})
+
+			It("performs UMA exchange during refresh and swaps token", func() {
+				rptToken := "rpt.header.payload.sig"
+				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					_ = r.ParseForm()
+					gt := r.FormValue("grant_type")
+					rw.Header().Add("content-type", "application/json")
+					if gt == "refresh_token" {
+						// return a PAT-like refresh response
+						fmt.Fprintf(rw, `{"access_token":"%s","refresh_token":"%s","expires_in":300,"id_token":"%s"}`, makeAccessToken(), refreshToken, makeIDToken())
+						return
+					}
+					if gt == "urn:ietf:params:oauth:grant-type:uma-ticket" {
+						fmt.Fprintf(rw, `{"access_token":"%s","expires_in":3600}`, rptToken)
+						return
+					}
+					// default
+					fmt.Fprintf(rw, `{"email": "new@thing.com", "expires_in": 300, "id_token": "%v", "access_token": "%v"}`, makeIDToken(), makeAccessToken())
+				}))
+				defer server.Close()
+
+				u, _ := url.Parse(server.URL)
+				provider := newKeycloakOIDCProvider(u, options.Provider{})
+				provider.ProfileURL = u
+				provider.useRPT = true
+
+				existingSession := &sessions.SessionState{
+					User:         "already",
+					Email:        "a@b.com",
+					Groups:       nil,
+					IDToken:      makeIDToken(),
+					AccessToken:  makeAccessToken(),
+					RefreshToken: refreshToken,
+				}
+
+				refreshed, err := provider.RefreshSession(context.Background(), existingSession)
+				Expect(err).To(BeNil())
+				Expect(refreshed).To(BeTrue())
+				Expect(existingSession.AccessToken).To(Equal(rptToken))
+				Expect(existingSession.Groups).To(BeEquivalentTo([]string{"role:write", "role:default:read"}))
+			})
 		})
 		It("creates new keycloak oidc provider with custom scope", func() {
 			p := NewKeycloakOIDCProvider(&ProviderData{Scope: "openid email"}, options.Provider{})
