@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/vscode/devcontainers/go:1-1.25
+FROM mcr.microsoft.com/devcontainers/go:1.25-bookworm
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
