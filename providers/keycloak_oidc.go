@@ -86,6 +86,7 @@ func (p *KeycloakOIDCProvider) EnrichSession(ctx context.Context, s *sessions.Se
 			return fmt.Errorf("unable to obtain RPT: %v", err)
 		}
 		s.AccessToken = rpt
+		p.addRPTPermissions(s)
 		s.CreatedAtNow()
 		s.SetExpiresOn(expiry)
 	}
@@ -112,6 +113,7 @@ func (p *KeycloakOIDCProvider) RefreshSession(ctx context.Context, s *sessions.S
 			return true, fmt.Errorf("unable to obtain RPT on refresh: %v", err)
 		}
 		s.AccessToken = rpt
+		p.addRPTPermissions(s)
 		s.CreatedAtNow()
 		s.SetExpiresOn(expiry)
 	}
@@ -183,6 +185,17 @@ type realmAccess struct {
 type accessClaims struct {
 	RealmAccess    realmAccess            `json:"realm_access"`
 	ResourceAccess map[string]interface{} `json:"resource_access"`
+	Authorization  authorizationClaims    `json:"authorization"`
+}
+
+type authorizationClaims struct {
+	Permissions []authorizationPermission `json:"permissions"`
+}
+
+type authorizationPermission struct {
+	RSID   string   `json:"rsid"`
+	RSName string   `json:"rsname"`
+	Scopes []string `json:"scopes"`
 }
 
 func (p *KeycloakOIDCProvider) getAccessClaims(s *sessions.SessionState) (*accessClaims, error) {
@@ -201,6 +214,24 @@ func (p *KeycloakOIDCProvider) getAccessClaims(s *sessions.SessionState) (*acces
 		return nil, err
 	}
 	return &claims, nil
+}
+
+func (p *KeycloakOIDCProvider) addRPTPermissions(s *sessions.SessionState) {
+	claims, err := p.getAccessClaims(s)
+	if err != nil {
+		logger.Printf("unable to extract RPT permissions: %v", err)
+		return
+	}
+
+	if len(claims.Authorization.Permissions) == 0 {
+		return
+	}
+
+	if s.AdditionalClaims == nil {
+		s.AdditionalClaims = make(map[string]interface{})
+	}
+
+	s.AdditionalClaims["permissions"] = claims.Authorization.Permissions
 }
 
 // getClientRoles extracts client roles from the `resource_access` claim with

@@ -52,6 +52,12 @@ func makeAccessToken() string {
 	return fmt.Sprintf("%s.%s.%s", accessTokenHeader, accessTokenPayload, accessTokenSignature)
 }
 
+func makeRPTToken() string {
+	rptPayload := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"authorization":{"permissions":[{"rsid":"rpt-id-1","rsname":"httpbin","scopes":["view"]}]}}`))
+	return fmt.Sprintf("%s.%s.%s", accessTokenHeader, rptPayload, accessTokenSignature)
+}
+
 func newTestKeycloakOIDCSetup() (*httptest.Server, *KeycloakOIDCProvider) {
 	redeemURL, server := newOIDCServer([]byte(fmt.Sprintf(`{"email": "new@thing.com", "expires_in": 300, "id_token": "%v", "access_token": "%v"}`, makeIDToken(), makeAccessToken())))
 	provider := newKeycloakOIDCProvider(redeemURL, options.Provider{})
@@ -151,7 +157,7 @@ var _ = Describe("Keycloak OIDC Provider Tests", func() {
 			})
 
 			It("exchanges PAT for RPT when enabled and preserves roles", func() {
-				rptToken := "rpt.header.payload.sig"
+				rptToken := makeRPTToken()
 				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 					_ = r.ParseForm()
 					gt := r.FormValue("grant_type")
@@ -184,6 +190,10 @@ var _ = Describe("Keycloak OIDC Provider Tests", func() {
 				Expect(existingSession.AccessToken).To(Equal(rptToken))
 				Expect(existingSession.ExpiresOn).ToNot(BeNil())
 				Expect(existingSession.Groups).To(BeEquivalentTo([]string{"role:write", "role:default:read"}))
+				Expect(existingSession.AdditionalClaims).To(HaveKey("permissions"))
+				perms, ok := existingSession.AdditionalClaims["permissions"].([]authorizationPermission)
+				Expect(ok).To(BeTrue())
+				Expect(perms).To(ContainElement(authorizationPermission{RSID: "rpt-id-1", RSName: "httpbin", Scopes: []string{"view"}}))
 			})
 
 			It("returns error when UMA endpoint fails", func() {
@@ -220,7 +230,7 @@ var _ = Describe("Keycloak OIDC Provider Tests", func() {
 			})
 
 			It("performs UMA exchange during refresh and swaps token", func() {
-				rptToken := "rpt.header.payload.sig"
+				rptToken := makeRPTToken()
 				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 					_ = r.ParseForm()
 					gt := r.FormValue("grant_type")
@@ -258,6 +268,10 @@ var _ = Describe("Keycloak OIDC Provider Tests", func() {
 				Expect(refreshed).To(BeTrue())
 				Expect(existingSession.AccessToken).To(Equal(rptToken))
 				Expect(existingSession.Groups).To(BeEquivalentTo([]string{"role:write", "role:default:read"}))
+				Expect(existingSession.AdditionalClaims).To(HaveKey("permissions"))
+				perms, ok := existingSession.AdditionalClaims["permissions"].([]authorizationPermission)
+				Expect(ok).To(BeTrue())
+				Expect(perms).To(ContainElement(authorizationPermission{RSID: "rpt-id-1", RSName: "httpbin", Scopes: []string{"view"}}))
 			})
 		})
 		It("creates new keycloak oidc provider with custom scope", func() {

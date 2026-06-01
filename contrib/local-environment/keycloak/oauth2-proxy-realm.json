@@ -689,6 +689,55 @@
         "display.on.consent.screen": "false",
         "saml.onetimeuse.condition": "false"
       },
+      "authorizationServicesEnabled": true,
+      "authorizationSettings": {
+        "allowRemoteResourceManagement": true,
+        "policyEnforcementMode": "ENFORCING",
+        "decisionStrategy": "UNANIMOUS",
+        "resources": [
+          {
+            "name": "httpbin",
+            "type": "urn:oauth2-proxy:resource:httpbin",
+            "uris": [
+              "/"
+            ],
+            "scopes": [
+              {
+                "name": "view"
+              }
+            ],
+            "ownerManagedAccess": false
+          }
+        ],
+        "scopes": [
+          {
+            "name": "view"
+          }
+        ],
+        "policies": [
+          {
+            "name": "UmaRolePolicy",
+            "description": "Require admin role",
+            "type": "role",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "roles": "[{\"id\":\"admin\",\"required\":true}]"
+            }
+          },
+          {
+            "name": "httpbin-permission",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"httpbin\"]",
+              "scopes": "[\"view\"]",
+              "applyPolicies": "[\"UmaRolePolicy\"]"
+            }
+          }
+        ]
+      },
       "authenticationFlowBindingOverrides": {},
       "fullScopeAllowed": true,
       "nodeReRegistrationTimeout": -1,
